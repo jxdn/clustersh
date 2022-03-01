@@ -1,0 +1,536 @@
+#!/bin/bash
+
+
+args=("$@")
+curwd=$(pwd)
+shrwd="/home/app/clustersh"
+
+
+
+#timestamp function
+timestamp() {
+  date +"%Y-%m-%d %T"
+}
+
+
+#log function 
+logfile="$shrwd/clustersh.log"
+logger(){
+   echo -e "$@"
+   echo -e "$(timestamp) $@" >> $logfile
+}
+
+
+hostfile="$shrwd/server.list"
+
+#root only function
+rootonly(){
+   if [ "$(id -u)" != "0" ]; then
+      echo "This service can only be run by root. Sorry." 1>&2
+      exit 1
+   fi
+}
+
+
+#hpcadmin only function
+
+hpcadminonly(){
+   adminmember=$(id -Gn | grep hpcadmin)
+   if [ "$(id -u)" != "0" ] && [ -z "$adminmember" ]; then
+      echo "This service can only be run by root or hpcadmin member. Sorry." 1>&2
+      exit 1
+   fi
+}
+
+#group quota
+set_group_quota(){
+   if [ -z "$1" ]; then isempty "Group name"; fi
+   if [ -z "$2" ]; then isempty "Quota size"; fi
+   soft=$(echo $quotasz | awk -F ':' '{print $1}')
+   hard=$(echo $quotasz | awk -F ':' '{print $2}')
+   logger "Set $2 quota size for username $1.."
+   xfs_quota -x -c 'limit -u bsoft='"$soft"' bhard='"$hard"' '"$usernm"'' /home
+   #mmsetquota gpfs0 --group $1 --block $2
+   #echo "tes" > /home/$1.test
+   #chgrp $1 /home/$1.test
+   #mmlsquota -g $1 --block-size auto gpfs0
+}
+
+#define passwd group and shadow
+
+passwdcur="/etc/passwd"
+passwdold="$shrwd/passwd.old"
+passwddif="$shrwd/passwd.dif"
+
+groupcur="/etc/group"
+groupold="$shrwd/group.old"
+groupdif="$shrwd/group.dif"
+
+shadowcur="/etc/shadow"
+shadowold="$shrwd/shadow.old"
+shadowdif="$shrwd/shadow.dif"
+
+domain=""
+usernm=""
+groupn=""
+quotasz=""
+
+
+
+#define function showArgs
+showArgs(){
+   echo -e "Arguments:"
+   echo -e "   -u <username>"
+   echo -e "   -g <groupname> \tSpecify group name."
+   echo -e "   -q <softlimit[:hardlimit]> \tSpecify quota size."
+   echo -e "   -a \t\t\tAdd into a group"
+   echo -e "   -r \t\t\tRemove from a group."
+}
+
+
+#define showHelp
+showHelp(){
+   echo -e "Usage: clustersh <service> [arguments]\n"
+   echo -e "Services:"
+   echo -e "   -h \t--help \t\tShow this help."
+   echo -e "   -s \t--show \t\tShow user/group info."
+   echo -e "   -ua \t--useradd \tAdd User ."
+   echo -e "   -ud \t--userdel \tDelete user."
+   echo -e "   -ug \t--usergrp \tModify user's group."
+   echo -e "   -ga \t--groupadd \tCreate a user group."
+   echo -e "   -gd \t--groupdel \tRemove a user group."
+   echo -e "   -gq \t--userquota \tSet user quota."
+   echo ""
+   showArgs
+   exit 1
+}
+
+
+#define function is empty
+
+isempty(){
+   logger "ERROR: $@ was not defined."
+   showHelp
+}
+
+
+#define too few args
+toofewArgs(){
+   logger "Too few arguments for service $@."
+   showHelp
+}
+
+
+
+#define to 0
+enableUser=0
+disableUser=0
+
+createGroup=0
+deleteGroup=0
+
+changeGroup=0
+addIntoGroup=0
+delFromGroup=0
+
+setgroupQuota=0
+gotQuotasz=0
+
+showStatus=0
+showUser=0
+showGroup=0
+
+
+# check services
+if [ -z "$1" ]; then
+  isempty "Service"; 
+elif [ "$1" == "-h" ] || [ "$1" == "--help" ]; then 
+  showHelp;
+elif [ "$1" == "-s" ] || [ "$1" == "--show" ]; then 
+  showStatus=1;
+elif [ "$1" == "-ua" ] || [ "$1" == "--useradd" ]; then 
+  logger "Service: Enabling user"
+  enableUser=1;
+elif [ "$1" == "-ud" ] || [ "$1" == "--userdel" ]; then 
+  logger "Service: Disabling user";
+  disableUser=1;
+elif [ "$1" == "-ug" ] || [ "$1" == "--usergrp" ]; then 
+  logger "Service: Change user group";
+  changeGroup=1;
+elif [ "$1" == "-ga" ] || [ "$1" == "--groupadd" ]; then 
+  logger "Service: Create group";
+  createGroup=1;
+elif [ "$1" == "-gd" ] || [ "$1" == "--groupdel" ]; then 
+  logger "Service: Delete group";
+  deleteGroup=1;
+elif [ "$1" == "-gq" ] || [ "$1" == "--groupquota" ]; then 
+  logger "Service: Set group quota";
+  setgroupQuota=1;
+else 
+  logger "Unknown service $1";
+  showHelp;
+fi
+
+
+
+
+
+# input arguments
+
+it=1
+while [ $it -lt ${#args[@]} ]; do 
+    if [ ${args[it]} == "-d" ]; then
+       domain=${args[it+1]}
+       if [ -z "$domain" ]; then isempty "NUS Domain"; fi
+
+    elif [ ${args[it]} == "-u" ]; then
+       usernm=${args[it+1]}
+       if [ -z "$usernm" ]; then isempty "User Name"; fi
+       showUser=1
+
+    elif [ ${args[it]} == "-g" ]; then
+       groupn=${args[it+1]}
+       if [ -z "$groupn" ]; then isempty "User Group"; fi
+       showGroup=1
+
+    elif [ ${args[it]} == "-q" ]; then
+       quotasz=${args[it+1]}
+       if [ -z "$quotasz" ]; then isempty "Quota Size"; fi
+       gotQuotasz=1
+
+    elif [ ${args[it]} == "-a" ]; then
+       addIntoGroup=1
+    elif [ ${args[it]} == "-r" ]; then
+       delFromGroup=1
+
+    fi
+
+    it=$(($it+1))
+
+done
+
+
+
+
+
+if [ $enableUser -eq 1 ]; then
+   rootonly
+   if [ $HOSTNAME != "fornax.nus.edu.sg" ]; then 
+      logger "Sorry, this service can only be called from head node."; 
+      showHelp
+   fi
+   
+
+   logger "Check username.."
+   if [ -z "$usernm" ]; then
+      isempty "username"
+      showHelp
+   fi 
+
+
+   logger "Check if user exists.."
+   id $usernm >/dev/null 2>&1
+   if [ $? -eq 0 ] ; then
+    echo "User Exists, exiting ...."
+   exit 1
+   else
+    echo "Creating Users ...."
+   fi
+  
+   logger "Create backup files.."
+   cp -f $passwdcur $passwdold
+   cp -f $groupcur $groupold
+   cp -f $shadowcur $shadowold
+
+ 
+   echo -e "Enter UID : "
+   read uid   
+   useradd -u $uid -g  users  $usernm
+   echo -e "==================================== ENTER PASSWORD ================================= "
+   passwd $usernm
+   echo -e "Enabling quota for new user"
+
+   cp /home/app/clustersh/bashrc_template /home/$usernm/.bashrc
+   chmod 644  /home/$usernm/.bashrc  
+   chown $usernm /home/$usernm/.bashrc
+   ##add scratch symlink
+   mkdir /scratch/$usernm
+   chown $usernm:users /scratch/$usernm
+   chmod 755 /scratch/$usernm
+   ln -s /scratch/$usernm /home/$usernm/scratch
+   
+   echo -e "==================================== BASHRC GENERATED  ================================= "
+   runuser -l $usernm -c 'cat /dev/zero | ssh-keygen -q -N ""'
+   runuser -l $usernm -c 'cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys'
+   runuser -l $usernm  -c 'chmod 600 ~/.ssh/authorized_keys'
+   runuser -l $usernm -c 'echo "StrictHostKeyChecking no" > ~/.ssh/config'
+   runuser -l $usernm -c 'chmod 600 ~/.ssh/config'
+     
+  
+   logger "Record changes.."
+   comm -2 -3 $passwdcur $passwdold > $passwddif
+   comm -2 -3 $groupcur $groupold > $groupdif
+   comm -2 -3 $shadowcur $shadowold > $shadowdif
+ 
+   xfs_quota -x -c 'limit -u bsoft=800G bhard=800G '"$usernm"'' /home
+   logger "Syinc to Compute Nodes"
+   mapfile -t servers < $hostfile
+   for i in "${servers[@]}"
+   do
+     ssh $i "hostname && cp -f $passwdcur $passwdcur.old && cp -f $groupcur $groupcur.old && cp -f $shadowcur $shadowcur.old"
+     ssh $i "hostname && cat $passwddif >> $passwdcur && cat $groupdif >> $groupcur && cat $shadowdif >> $shadowcur"
+   done
+
+
+fi
+
+
+
+if [ $disableUser -eq 1 ]; then
+   rootonly
+   if [ $HOSTNAME != "fornax.nus.edu.sg" ]; then 
+      logger "Sorry, this service can only be called from head node."; 
+      showHelp
+   fi
+   
+
+   logger "Check username.."
+   if [ -z "$usernm" ]; then
+      isempty "username"
+      showHelp
+   fi 
+
+      
+   logger "Make home dir backup.."
+   logger "Remove associate local user.."
+   userdel -rf $usernm
+   logger "Record changes.."
+   comm -1 -3 $passwdcur $passwdold > $passwddif
+   comm -1 -3 $groupcur $groupold > $groupdif
+   comm -1 -3 $shadowcur $shadowold > $shadowdif
+
+
+   logger "Sync changes to compute node.."
+   mapfile -t servers < $hostfile
+   for i in "${servers[@]}"
+   do
+     ssh $i "hostname && userdel  $usernm"
+   done
+
+   logger "Done deleting. Exit."
+fi
+
+
+if [ $createGroup -eq 1 ]; then
+   rootonly
+   if [ $HOSTNAME != "fornax.nus.edu.sg" ]; then 
+      logger "Sorry, this service can only be called from head node."; 
+      showHelp
+   fi
+   
+   logger "Check groupname.."
+   if [ -z "$groupn" ]; then
+      isempty "groupname"
+      showHelp
+   fi 
+
+   logger "Create backup files.."
+   cp -f $groupcur $groupold
+
+   logger "Create group.."
+   groupadd $groupn
+
+   logger "Record changes.."
+   comm -2 -3 $groupcur $groupold > $groupdif
+
+   logger "Sync to Computes Nodes"
+   mapfile -t servers < $hostfile
+   for i in "${servers[@]}"
+   do
+     ssh $i "hostname && cp -f $groupcur $groupcur.old && cat $groupdif >> $groupcur"
+   done
+   #echo "tes" > /home/$groupn.test
+   #chgrp $groupn /home/$groupn.test
+   logger " Create Group Done. Exit."
+
+fi
+
+
+
+if [ $deleteGroup -eq 1 ]; then
+   rootonly
+   if [ $HOSTNAME != "fornax.nus.edu.sg" ]; then 
+      logger "Sorry, this service can only be called from head node."; 
+      showHelp
+   fi
+   
+   logger "Check groupname.."
+   if [ -z "$groupn" ]; then
+      isempty "groupname"
+      showHelp
+   fi 
+
+   logger "Create backup files.."
+   cp -f $groupcur $groupold
+
+   logger "Delete group.."
+   groupdel $groupn
+
+   logger "Record changes.."
+   comm -1 -3 $groupcur $groupold > $groupdif
+
+
+   logger "Sync changes to login and nsd servers.."
+   mapfile -t servers < $hostfile
+   for i in "${servers[@]}"
+   do
+     ssh $i "hostname && groupdel $groupn"
+   done
+   logger "Done. Exit."
+
+fi
+
+
+if [ $changeGroup -eq 1 ]; then
+   rootonly
+   if [ $HOSTNAME != "fornax.nus.edu.sg" ]; then 
+      logger "Sorry, this service can only be called from head node."; 
+      showHelp
+   fi
+   
+
+   logger "Check username.."
+   if [ -z "$usernm" ]; then
+      isempty "username"
+      showHelp
+   fi 
+   logger "Check groupname.."
+   if [ -z "$groupn" ]; then
+      isempty "groupname"
+      showHelp
+   fi 
+
+
+   if [ $addIntoGroup -eq 1 ]; then
+      logger "Adding $domain\\\\$usernm into group $groupn .."
+   elif [ $delFromGroup -eq 1 ]; then
+      logger "Remove $domain\\\\$usernm from group $groupn .."
+   else
+      logger "ERROR: Please specify adding (-a) or removing (-r) task."
+      showHelp
+   fi
+
+   logger "Check if group exists.."
+   grpexist=$(getent group $groupn)
+   if [ -z "$grpexist" ]; then
+      logger "  Group $groupn does not exist. Please create it."
+      showHelp
+   fi
+
+   logger "Create backup files.."
+   cp -f $groupcur $groupold
+
+   if [ $addIntoGroup -eq 1 ]; then
+      usermod -a -G $groupn $usernm
+   elif [ $delFromGroup -eq 1 ]; then
+      gpasswd -d $usernm $groupn
+   fi
+
+   logger "Record changes.."
+   comm -2 -3 $groupcur $groupold > $groupdif
+
+
+   logger "Sync changes to  computenodes"
+   mapfile -t servers < $hostfile
+   if [ $addIntoGroup -eq 1 ]; then
+      for i in "${servers[@]}"
+      do
+         ssh $i "hostname  && usermod -a -G $groupn $usernm"
+      done
+   elif [ $delFromGroup -eq 1 ]; then
+      for i in "${servers[@]}"
+      do
+         ssh $i "hostname &&  gpasswd -d $usernm $groupn"
+      done
+   fi
+
+   logger "Done. Exit."
+
+fi
+
+if [ $showStatus -eq 1 ]; then
+   hpcadminonly
+   if [ $showUser -eq 1 ]; then
+       logger "Service: Show user status";
+       echo -e "=============================="
+       echo -e "\t\tid\t\t: $(id -u $usernm)"
+       echo -e "\t\tusernm\t\t: $usernm"
+       echo -e "\t\temail \t\t: "
+       echo -e "\t\tgroups\t\t: $(id -Gn $usernm)"
+       logger "\t\tQuota:";
+       usage=$(xfs_quota -x -c 'report -h ' /home/ | grep -w $usernm | awk '{print $2}')
+       quota=$(xfs_quota -x -c 'report -h ' /home/ | grep -w $usernm | awk '{print $3}')
+       limit=$(xfs_quota -x -c 'report -h ' /home/ | grep -w $usernm | awk '{print $4}')
+       logger "\t\t\tUsage: $usage";
+       logger "\t\t\tSoftL: $quota";
+       logger "\t\t\tHardL: $limit";
+       echo -e ""
+   elif [ $showGroup -eq 1 ]; then
+       logger "Service: Show group status";
+       if [ -z "$domain" ]; then
+          groupnm=$(getent group $groupn | cut -d: -f1)
+          if [ -z "$groupnm" ]; then exit 1; fi
+          groupid=$(getent group $groupn | cut -d: -f3)
+          groupmem=$(lid -g $groupn)
+         
+          logger "Group info :";
+          logger "====================";
+          logger "Name: $groupnm";
+          logger "Gid:  $groupid";
+          logger "Quota:";
+          logger "  Usage: $groupusage";
+          logger "  SoftL: $groupquota";
+          logger "  HardL: $grouplimit";
+          logger "Members:";
+          if [ -z "$groupmem" ]; then logger "None";
+          else logger "$groupmem"; 
+          fi
+       else
+		echo -e "tes"
+       fi
+   else
+       toofewArgs "'show info'"
+   fi
+
+fi
+
+
+if [ $setgroupQuota -eq 1 ]; then
+   rootonly
+   if [ $HOSTNAME != "fornax.nus.edu.sg" ]; then 
+      logger "Sorry, this service can only be called from head node."; 
+      showHelp
+   fi
+   
+   logger "Check username.."
+   if [ -z "$usernm" ]; then
+      isempty "usernm"
+      showHelp
+   fi 
+
+   logger "Check if username exists.."
+   grpexist=$(id $usernm)
+   if [ -z "$grpexist" ]; then
+      logger "user $groupn does not exist. Please create it."
+      showHelp
+   fi
+
+   logger "Check quota size.."
+   if [ -z "$quotasz" ]; then
+      isempty "Quota size"
+      showHelp
+   fi
+ 
+ set_group_quota $usernm $quotasz
+
+fi 
